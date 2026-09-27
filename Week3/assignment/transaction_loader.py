@@ -78,22 +78,30 @@ def load_batch(conn, rows: list) -> int:
     Raises:
         Exception: re-raised after rollback so the caller knows it failed
     """
-    # TODO: implement this function
-    #
-    # Steps:
-    #   1. Set conn.autocommit = False  (explicit transaction control)
-    #   2. Open a cursor
-    #   3. Loop through rows, executing INSERT_SQL for each
-    #      - track which row number you're on (for error logging)
-    #   4. If all succeed: conn.commit(), return len(rows)
-    #   5. If any fail:
-    #      - conn.rollback()
-    #      - log the error and which row caused it
-    #      - raise the exception so the caller sees the failure
-    #
-    # Hint: use a try / except / else pattern, or try / except with raise
 
-    pass  # replace this
+    if conn.autocommit:
+        conn.autocommit = False
+
+    current_row = 0
+
+    try:
+        with conn.cursor() as cur:
+            for current_row, row in enumerate(rows, start=1):
+                cur.execute(INSERT_SQL, row)
+
+        conn.commit()
+        logger.info(f"Batch committed successfully: {len(rows)} rows loaded")
+        return len(rows)
+
+    except Exception as e:
+        conn.rollback()
+
+        logger.error(
+            f"Batch failed on row {current_row}. "
+            f"Entire batch rolled back. Error: {e}"
+        )
+
+        raise
 
 
 def get_test_batches():
