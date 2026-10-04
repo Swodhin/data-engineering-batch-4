@@ -29,6 +29,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from decimal import Decimal, ROUND_HALF_UP
 
 load_dotenv()
 
@@ -272,44 +273,66 @@ def transform_trip(trip_data, lookups):
 
         date_key = int(row["requested_at"].strftime("%Y%m%d"))
         if date_key not in lookups["date"]:
-            logger.warning(f"trip {trip_id}: date_key {date_key} outside of dim_date range — skipped")
+            logger.warning(
+                f"trip {trip_id}: date_key {date_key} outside of dim_date range — skipped"
+            )
             skipped += 1
             continue
 
-        # TODO (P1): compute time_key — HHMM of requested_at, minutes rounded DOWN
-        # to the 15-minute bucket (14:37 -> 1430, 09:05 -> 900, 00:59 -> 45).
-        # Skip + warn (like date_key above) if it isn't in lookups["time"].
-        time_key = None
+        # P1: compute time_key — HHMM rounded down to 15-minute bucket
+        requested_at = row["requested_at"]
+        hour = requested_at.hour
+        minute_bucket = (requested_at.minute // 15) * 15
+        time_key = hour * 100 + minute_bucket
+
+        if time_key not in lookups["time"]:
+            logger.warning(
+                f"trip {trip_id}: time_key {time_key} not in dim_time — skipped"
+            )
+            skipped += 1
+            continue
 
         driver_key = lookups["driver"].get(row["driver_id"])
         if driver_key is None:
-            logger.warning(f"trip {trip_id}: driver_id {row['driver_id']} not in dim_driver — skipped")
+            logger.warning(
+                f"trip {trip_id}: driver_id {row['driver_id']} not in dim_driver — skipped"
+            )
             skipped += 1
             continue
 
         passenger_key = lookups["passenger"].get(row["passenger_id"])
         if passenger_key is None:
-            logger.warning(f"trip {trip_id}: passenger_id {row['passenger_id']} not in dim_passenger — skipped")
+            logger.warning(
+                f"trip {trip_id}: passenger_id {row['passenger_id']} not in dim_passenger — skipped"
+            )
             skipped += 1
             continue
 
         pickup_location_key = lookups["location"].get(row["pickup_location_id"])
         if pickup_location_key is None:
-            logger.warning(f"trip {trip_id}: pickup_location_id {row['pickup_location_id']} not in dim_location — skipped")
+            logger.warning(
+                f"trip {trip_id}: pickup_location_id {row['pickup_location_id']} not in dim_location — skipped"
+            )
             skipped += 1
             continue
 
         dropoff_location_key = lookups["location"].get(row["dropoff_location_id"])
         if dropoff_location_key is None:
-            logger.warning(f"trip {trip_id}: dropoff_location_id {row['dropoff_location_id']} not in dim_location — skipped")
+            logger.warning(
+                f"trip {trip_id}: dropoff_location_id {row['dropoff_location_id']} not in dim_location — skipped"
+            )
             skipped += 1
             continue
 
         payment_method_key = None
         if row["payment_method_id"] is not None:
-            payment_method_key = lookups["payment_method"].get(row["payment_method_id"])
+            payment_method_key = lookups["payment_method"].get(
+                row["payment_method_id"]
+            )
             if payment_method_key is None:
-                logger.warning(f"trip {trip_id}: payment_method_id {row['payment_method_id']} not in dim_payment_method — skipped")
+                logger.warning(
+                    f"trip {trip_id}: payment_method_id {row['payment_method_id']} not in dim_payment_method — skipped"
+                )
                 skipped += 1
                 continue
 
@@ -317,7 +340,9 @@ def transform_trip(trip_data, lookups):
         if row["promo_code_id"] is not None:
             promo_code_key = lookups["promo_code"].get(row["promo_code_id"])
             if promo_code_key is None:
-                logger.warning(f"trip {trip_id}: promo_code_id {row['promo_code_id']} not in dim_promo_code — skipped")
+                logger.warning(
+                    f"trip {trip_id}: promo_code_id {row['promo_code_id']} not in dim_promo_code — skipped"
+                )
                 skipped += 1
                 continue
 
@@ -326,7 +351,10 @@ def transform_trip(trip_data, lookups):
         tip_amount = row["tip_amount"] or 0
         surge_multiplier = row["surge_multiplier"] or 0
         discount_amount = row["discount_amount"] or 0
-        fare_amount = round(base_fare * surge_multiplier + tip_amount - discount_amount, 2)
+
+        fare_amount = (
+            base_fare * surge_multiplier + tip_amount - discount_amount
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         duration_minutes = None
         if row["status"] == "completed" and row["completed_at"]:
@@ -343,8 +371,8 @@ def transform_trip(trip_data, lookups):
             "dropoff_location_key": dropoff_location_key,
             "payment_method_key":   payment_method_key,
             "promo_code_key":       promo_code_key,
-            "trip_status":          None,   # TODO (P1)
-            "cancelled_by":         None,   # TODO (P1)
+            "trip_status":          row["status"],
+            "cancelled_by":         row["cancelled_by"],
             "base_fare":            base_fare,
             "tip_amount":           tip_amount,
             "discount_amount":      discount_amount,
@@ -356,6 +384,7 @@ def transform_trip(trip_data, lookups):
             "surge_multiplier":     surge_multiplier,
             "requested_at":         row["requested_at"],
         })
+
     logger.info(f"Transformed {len(fact_rows)} rows, skipped {skipped}")
     return fact_rows
 
@@ -427,8 +456,109 @@ def reconcile(src_conn, dst_conn):
         True if every check passed, False otherwise. Don't raise on a mismatch —
         log it with both numbers so whoever reads the log can see how far off it is.
     """
-    # TODO (P2)
-    raise NotImplementedError("P2: implement reconcile()")
+    all_passed = True
+
+    # ------------------------------------------------------------
+    # Check 1: dimension row counts
+    # ------------------------------------------------------------
+
+    with src_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM drivers")
+        src_drivers = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM passengers")
+        src_passengers = cur.fetchone()[0]
+
+    with dst_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM dim_driver")
+        dst_drivers = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM dim_passenger")
+        dst_passengers = cur.fetchone()[0]
+
+    drivers_pass = src_drivers == dst_drivers
+    passengers_pass = src_passengers == dst_passengers
+
+    logger.info(
+        f"{'PASS' if drivers_pass else 'FAIL'} drivers count: "
+        f"source={src_drivers}, warehouse={dst_drivers}"
+    )
+
+    logger.info(
+        f"{'PASS' if passengers_pass else 'FAIL'} passengers count: "
+        f"source={src_passengers}, warehouse={dst_passengers}"
+    )
+
+    if not drivers_pass or not passengers_pass:
+        all_passed = False
+
+    # ------------------------------------------------------------
+    # Check 2: trip counts per status
+    # ------------------------------------------------------------
+
+    with src_conn.cursor() as cur:
+        cur.execute("""
+            SELECT status, COUNT(*)
+            FROM trips
+            GROUP BY status
+        """)
+        src_status_counts = dict(cur.fetchall())
+
+    with dst_conn.cursor() as cur:
+        cur.execute("""
+            SELECT trip_status, COUNT(*)
+            FROM fact_trips
+            GROUP BY trip_status
+        """)
+        dst_status_counts = dict(cur.fetchall())
+
+    all_statuses = set(src_status_counts) | set(dst_status_counts)
+
+    for status in sorted(all_statuses, key=lambda x: str(x)):
+        src_count = src_status_counts.get(status, 0)
+        dst_count = dst_status_counts.get(status, 0)
+
+        passed = src_count == dst_count
+
+        logger.info(
+            f"{'PASS' if passed else 'FAIL'} status {status}: "
+            f"source={src_count}, warehouse={dst_count}"
+        )
+
+        if not passed:
+            all_passed = False
+
+    # ------------------------------------------------------------
+    # Check 3: completed revenue
+    # ------------------------------------------------------------
+
+    with src_conn.cursor() as cur:
+        cur.execute("""
+            SELECT COALESCE(SUM(fare_amount), 0)
+            FROM v_trips
+            WHERE status = 'completed'
+        """)
+        src_revenue = cur.fetchone()[0]
+
+    with dst_conn.cursor() as cur:
+        cur.execute("""
+            SELECT COALESCE(SUM(fare_amount), 0)
+            FROM fact_trips
+            WHERE trip_status = 'completed'
+        """)
+        dst_revenue = cur.fetchone()[0]
+
+    revenue_pass = src_revenue == dst_revenue
+
+    logger.info(
+        f"{'PASS' if revenue_pass else 'FAIL'} completed revenue: "
+        f"source={src_revenue}, warehouse={dst_revenue}"
+    )
+
+    if not revenue_pass:
+        all_passed = False
+
+    return all_passed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
