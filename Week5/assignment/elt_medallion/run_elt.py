@@ -17,7 +17,8 @@ Run from Week5/assignment/elt_medallion/:
     python run_elt.py                        # copy the source into bronze, then build silver + gold
     python run_elt.py --skip-extract         # rebuild silver + gold from bronze; source untouched
 """
-
+import io
+from psycopg2 import sql
 import argparse
 import logging
 import os
@@ -131,23 +132,107 @@ def step(lake, batch_id, name):
 
 def extract_load_table(src, lake, table, batch_id):
     """
-    TODO: copy one source table into bronze.<table> and return the number of rows
-    copied. Bronze only ever grows: don't delete or update what's already there.
+    Copy one source table into bronze.<table> using COPY.
 
-    Requirements:
-      - Stream it with COPY on both sides, not SELECT + executemany:
-            src:  cur.copy_expert("COPY (SELECT ...) TO STDOUT ...", buffer)
-            lake: cur.copy_expert("COPY bronze.<table> (...) FROM STDIN ...", buffer)
-        An io.StringIO buffer is fine at this size.
-      - Every landed row gets _batch_id = batch_id and _source = SOURCE_NAME.
-        (One way: select them as constants in the source query, so they're just two
-        more columns in the COPY stream.)
-      - NULL must survive the trip as NULL, not as the string 'None' or ''.
-      - Use the column list from SOURCE_TABLES[table] on both sides. Never SELECT *.
-      - Build identifiers with psycopg2.sql.Identifier, not f-strings.
-      - Commit once per table, so a failure leaves no half-loaded table behind.
+    Bronze is append-only. Each row is tagged with:
+      - _batch_id
+      - _source
     """
-    raise NotImplementedError("extract_load_table")
+
+    columns = SOURCE_TABLES[table]
+
+    source_columns = sql.SQL(", ").join(
+        sql.Identifier(col) for col in columns
+    )
+
+    destination_columns = sql.SQL(", ").join(
+        [
+            *(sql.Identifier(col) for col in columns),
+            sql.Identifier("_batch_id"),
+            sql.Identifier("_source"),
+        ]
+    )
+
+    buffer = io.StringIO()
+
+    # Source -> memory buffer
+    source_copy = sql.SQL("""
+        COPY (
+            SELECT
+                {columns},
+                {batch_id} AS _batch_id,
+                {source_name} AS _source
+            FROM {table}
+        )
+        TO STDOUT
+        WITH (
+            FORMAT CSV,
+            NULL '\\N'
+        )
+    """).format(
+        columns=source_columns,
+        batch_id=sql.Literal(batch_id),
+        source_name=sql.Literal(SOURCE_NAME),
+        table=sql.Identifier(table),
+    )
+
+    try:
+        with src.cursor() as src_cur:
+            src_cur.copy_expert(
+                source_copy.as_string(src),
+                buffer,
+            )
+
+        buffer.seek(0)
+
+        # Memory buffer -> bronze
+        destination_copy = sql.SQL("""
+            COPY {schema}.{table} ({columns})
+            FROM STDIN
+            WITH (
+                FORMAT CSV,
+                NULL '\\N'
+            )
+        """).format(
+            schema=sql.Identifier("bronze"),
+            table=sql.Identifier(table),
+            columns=destination_columns,
+        )
+
+        with lake.cursor() as lake_cur:
+            lake_cur.copy_expert(
+                destination_copy.as_string(lake),
+                buffer,
+            )
+
+            # Count rows inserted for this table/batch.
+            count_sql = sql.SQL("""
+                SELECT COUNT(*)
+                FROM {schema}.{table}
+                WHERE _batch_id = %s
+                  AND _source = %s
+            """).format(
+                schema=sql.Identifier("bronze"),
+                table=sql.Identifier(table),
+            )
+
+            lake_cur.execute(
+                count_sql,
+                (batch_id, SOURCE_NAME),
+            )
+
+            row_count = lake_cur.fetchone()[0]
+
+        lake.commit()
+
+        return row_count
+
+    except Exception:
+        lake.rollback()
+        raise
+
+    finally:
+        buffer.close()
 
 
 def extract_load(src, lake, batch_id):
