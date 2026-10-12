@@ -37,10 +37,28 @@ python run_elt.py --skip-extract     # rebuild silver + gold from bronze only
 In Part 1 the transformation is Python. Here it is SQL inside the database. Give one advantage
 of each approach.
 
+ETL lets Python perform complex transformations before the data reaches the
+warehouse, which is useful when the transformation logic is easier to express
+in application code. ELT loads the raw data first and uses SQL inside the
+database, which makes transformations easy to rebuild using the database's
+processing power.
+
 ### 2. Why keep bronze?
 In step (c) you changed a rule and rebuilt gold. How would you have done that in the Part 1
 pipeline, which keeps no raw copy?
 
+Bronze keeps the original raw source data unchanged. When the region rule
+changed so Texas and Arizona became Southwest, Silver and Gold could simply
+be rebuilt from Bronze without reading the source again. In the Part 1 ETL
+pipeline, because no raw copy is retained, we would normally need to extract
+the source data again and rerun the transformation.
+
 ### 3. Quarantine vs reject
 Part 1 logs rejected rows and drops them. Here they go to a table. What can you do with the
 table that you can't do with a log line?
+
+A quarantine table preserves the complete bad row together with its rejection
+reason. Analysts or engineers can query, investigate, fix, and potentially
+reprocess those rows later. A log message only records information about the
+failure and does not provide a structured dataset that can easily be queried
+or reprocessed.

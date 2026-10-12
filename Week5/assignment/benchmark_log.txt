@@ -1,0 +1,10 @@
+
+Load benchmark - 10,000 rows
+executemany: 1.046s
+execute_values: 0.287s
+speed-up: 3.6x
+
+V4 answers:
+At 10,000 rows, the pandas transform alone gives only a small speed improvement (about 1.1x), so the benefit is modest at this size. However, the bulk load using execute_values is clearly worthwhile, giving about a 3.6x speed-up.
+
+In this run, loading takes the most time. Extraction took about 0.111s, transformation about 0.05s, while the bulk fact load took about 0.45s.

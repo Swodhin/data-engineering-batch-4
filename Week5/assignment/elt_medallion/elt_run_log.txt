@@ -1,0 +1,21 @@
+Week 5 Part 3 — ELT Run Log
+
+STEP (a) — Initial Bronze -> Silver -> Gold load
+- Bronze loaded all ride_prod source tables.
+- gold.fact_trips count: 10000
+- Gold completed revenue matched ride_prod.v_trips completed revenue to the cent.
+
+STEP (b) — Partner feed + ride_prod correction
+- silver.trips count: 10002
+- silver.trips_quarantine count: 7
+- gold.fact_trips count: 10002
+- trip 900001: completed, fare_amount 20.90
+- trip 900009: cancelled, cancelled_by passenger, fare_amount 14.63
+- trip 2 driver_rating: 3.0 in both Silver and Gold
+- Invalid partner rows were quarantined rather than dropped.
+
+STEP (c) — Region rule change
+- Texas and Arizona were changed to the Southwest region in 10_silver.sql.
+- Silver and Gold were rebuilt from Bronze using:
+  python run_elt.py --skip-extract
+- gold.mart_monthly_region_revenue contains Southwest rows.

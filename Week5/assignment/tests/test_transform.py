@@ -66,3 +66,77 @@ def test_fare_rounds_half_up(one_trip, lookups):
 #   - an unknown driver_id goes to rejects, not to facts
 #   - a NULL promo_code_id is NOT a reject
 #   - duration_minutes is NULL for a cancelled trip
+
+def test_time_key_1437(one_trip, lookups):
+    facts, rejects = transform_trips_df(one_trip, lookups)
+
+    assert len(rejects) == 0
+    assert facts.loc[0, "time_key"] == 1430
+
+
+def test_time_key_midnight(one_trip, lookups):
+    trip = one_trip.copy()
+    trip.loc[0, "requested_at"] = pd.Timestamp("2025-03-14 00:00:00")
+
+    facts, rejects = transform_trips_df(trip, lookups)
+
+    assert len(rejects) == 0
+    assert facts.loc[0, "time_key"] == 0
+
+
+def test_time_key_235959(one_trip, lookups):
+    trip = one_trip.copy()
+    trip.loc[0, "requested_at"] = pd.Timestamp("2025-03-14 23:59:59")
+
+    facts, rejects = transform_trips_df(trip, lookups)
+
+    assert len(rejects) == 0
+    assert facts.loc[0, "time_key"] == 2345
+
+
+def test_unknown_driver_goes_to_rejects(one_trip, lookups):
+    trip = one_trip.copy()
+    trip.loc[0, "driver_id"] = 999
+
+    facts, rejects = transform_trips_df(trip, lookups)
+
+    assert len(facts) == 0
+    assert len(rejects) == 1
+    assert rejects.iloc[0]["reject_reason"] == "driver_id not in dim_driver"
+
+
+def test_null_promo_code_is_not_rejected(one_trip, lookups):
+    facts, rejects = transform_trips_df(one_trip, lookups)
+
+    assert len(rejects) == 0
+    assert len(facts) == 1
+    assert pd.isna(facts.loc[0, "promo_code_key"])
+
+
+def test_cancelled_trip_has_null_duration(one_trip, lookups):
+    trip = one_trip.copy()
+
+    trip.loc[0, "status"] = "cancelled"
+    trip.loc[0, "completed_at"] = pd.NaT
+    trip.loc[0, "cancelled_by"] = "passenger"
+
+    facts, rejects = transform_trips_df(trip, lookups)
+
+    assert len(rejects) == 0
+    assert pd.isna(facts.loc[0, "duration_minutes"])
+
+def test_fare_rounding_trip_37(one_trip, lookups):
+    trip = one_trip.copy()
+
+    trip.loc[0, "base_fare"] = 93.78
+    trip.loc[0, "surge_multiplier"] = 1.25
+    trip.loc[0, "tip_amount"] = 11.17
+    trip.loc[0, "discount_amount"] = 0.00
+
+    # Exact decimal result:
+    # 93.78 * 1.25 + 11.17 = 128.395
+    # PostgreSQL half-up rounding -> 128.40
+    facts, rejects = transform_trips_df(trip, lookups)
+
+    assert len(rejects) == 0
+    assert facts.loc[0, "fare_amount"] == pytest.approx(128.40, abs=1e-9)
